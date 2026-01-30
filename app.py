@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import requests
-import io
+import io # メモリ上でのファイル操作用
 
 # 機械学習ライブラリの読み込み
 try:
@@ -36,8 +36,9 @@ for key, val in default_state.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
-# --- モデル読み込みロジック ---
+# --- モデル読み込みロジック (分割対応) ---
 def load_split_model(base_filepath):
+    """ 分割されたモデルファイル(.partX)を探して結合し、読み込む """
     part_files = []
     i = 0
     while True:
@@ -51,20 +52,23 @@ def load_split_model(base_filepath):
     if not part_files:
         return None
 
+    # メモリ上で結合
     combined_data = bytearray()
     for part in part_files:
         with open(part, "rb") as f:
             combined_data.extend(f.read())
             
+    # joblibでロード
     try:
         return joblib.load(io.BytesIO(combined_data))
-    except Exception as e:
+    except Exception:
         return None
 
 @st.cache_resource
 def load_or_train_model():
+    # 戻り値: (モデル, 状態テキスト, エラーリスト)
     if not ml_available:
-        return None, "unavailable", []
+        return None, "unavailable", ["scikit-learn または joblib がインストールされていません"]
 
     # 探索するモデルのパス候補
     candidates = ['baseball_model.pkl']
@@ -72,37 +76,38 @@ def load_or_train_model():
     model_dir = 'baseball_model'
     if os.path.exists(model_dir):
         files = os.listdir(model_dir)
-        # .pkl ファイルを探す
         pkl_candidates = [os.path.join(model_dir, f) for f in files if f.endswith('.pkl')]
-        # .pkl.part0 ファイル（分割ファイル）を探す
         part_candidates = [os.path.join(model_dir, f.replace('.part0', '')) for f in files if f.endswith('.pkl.part0')]
         
         candidates.extend(pkl_candidates)
         candidates.extend(part_candidates)
 
-    # 候補を名前順（降順＝新しい日付順）にソート
+    # 候補をソート（新しいもの順など適当に）
     candidates.sort(reverse=True)
 
-    load_errors = [] # エラーログ用
+    error_logs = []
 
+    # 候補を順に試す
     for model_path in candidates:
-        # 1. 通常ファイル
+        # 1. 通常のモデルファイルがある場合
         if os.path.exists(model_path):
             try:
                 return joblib.load(model_path), f"loaded ({os.path.basename(model_path)})", []
             except Exception as e:
-                load_errors.append(f"エラー ({os.path.basename(model_path)}): {str(e)}")
-                continue
+                error_logs.append(f"読込失敗: {os.path.basename(model_path)} -> {str(e)}")
+                continue # 次の候補へ
 
-        # 2. 分割ファイル
+        # 2. 分割モデルファイルがある場合
         try:
             split_model = load_split_model(model_path)
             if split_model:
                 return split_model, f"loaded split ({os.path.basename(model_path)})", []
         except Exception as e:
-             load_errors.append(f"分割エラー ({os.path.basename(model_path)}): {str(e)}")
+            error_logs.append(f"分割読込失敗: {os.path.basename(model_path)} -> {str(e)}")
 
-    # 3. 全て失敗した場合 -> デモ学習
+    # 3. 外部URLからのダウンロード (省略)
+    
+    # 4. デモ用簡易学習 (モデルが見つからない場合)
     n_samples = 3000
     X = [] 
     y = []
@@ -115,6 +120,7 @@ def load_or_train_model():
         r1 = np.random.randint(0, 2)
         r2 = np.random.randint(0, 2)
         r3 = np.random.randint(0, 2)
+        
         prob = 0.5 + (diff * 0.1)
         if inn >= 7: prob += (diff * 0.05)
         runners_score = r1 + r2*1.5 + r3*2
@@ -132,17 +138,10 @@ def load_or_train_model():
     clf = RandomForestClassifier(n_estimators=50, max_depth=7, random_state=42)
     clf.fit(X, y)
     
-    return clf, "trained (demo)", load_errors
+    # エラーログがあった場合はそれを返す
+    return clf, "trained (demo)", error_logs
 
-# モデル取得
-ml_model, model_source, error_logs = load_or_train_model()
-
-# エラーがあった場合の表示（デバッグ用）
-if error_logs:
-    st.error("⚠️ モデルファイルの読み込みに失敗しました")
-    with st.expander("エラー詳細を確認する"):
-        for err in error_logs:
-            st.code(err)
+ml_model, model_source, load_errors = load_or_train_model()
 
 # --- ロジック関数 ---
 def reset_all_situation():
@@ -215,7 +214,7 @@ def calculate_win_prob_ml():
     score_diff = s.score_home - s.score_away
     is_top_val = 1 if s.top_bot == "表" else 0
     
-    # 基本の7特徴量
+    # 入力データ（特徴量）
     input_data = [
         score_diff,
         s.inning,
@@ -226,11 +225,10 @@ def calculate_win_prob_ml():
         int(s.runner_3)
     ]
     
-    # モデルがOPS等の追加特徴量を求めている場合の対応
+    # 特徴量数の調整
     if hasattr(ml_model, "n_features_in_") and ml_model.n_features_in_ > len(input_data):
-        missing_cols = ml_model.n_features_in_ - len(input_data)
-        # 不足分を平均値(0.720)で埋める
-        input_data.extend([0.720] * missing_cols)
+        missing = ml_model.n_features_in_ - len(input_data)
+        input_data.extend([0.720] * missing) # OPSなどを平均値で埋める
         
     try:
         prob = ml_model.predict_proba([input_data])[0][1]
@@ -277,18 +275,12 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- 1. スコアボード ---
 innings_html = "".join([f"<th>{i}</th>" for i in range(1, 10)])
 inning_cells = "<td></td>" * 9
-st.markdown(f"""
-<table class="scoreboard-table">
-    <thead><tr><th class="team-name">TEAM</th>{innings_html}<th class="score-total">R</th><th>H</th><th>E</th></tr></thead>
-    <tbody>
-        <tr><td class="team-name" style="color:#60a5fa;">VISITOR</td>{inning_cells}<td class="score-total">{st.session_state.score_away}</td><td>-</td><td>-</td></tr>
-        <tr><td class="team-name" style="color:#f87171;">HOME</td>{inning_cells}<td class="score-total">{st.session_state.score_home}</td><td>-</td><td>-</td></tr>
-    </tbody>
-</table>
-""", unsafe_allow_html=True)
+st.markdown(f"""<table class="scoreboard-table"><thead><tr><th class="team-name">TEAM</th>{innings_html}<th class="score-total">R</th><th>H</th><th>E</th></tr></thead><tbody><tr><td class="team-name" style="color:#60a5fa;">VISITOR</td>{inning_cells}<td class="score-total">{st.session_state.score_away}</td><td>-</td><td>-</td></tr><tr><td class="team-name" style="color:#f87171;">HOME</td>{inning_cells}<td class="score-total">{st.session_state.score_home}</td><td>-</td><td>-</td></tr></tbody></table>""", unsafe_allow_html=True)
 
+# --- 2. 操作パネル ---
 c1, c2, c3 = st.columns([1, 0.8, 1])
 with c1:
     st.markdown('<div class="control-label" style="color:#3b82f6;">VISITOR</div>', unsafe_allow_html=True)
@@ -312,16 +304,7 @@ with c3:
     with hc2: st.markdown(f"<div style='text-align:center; font-size:2rem; font-weight:bold; line-height:1;'>{st.session_state.score_home}</div>", unsafe_allow_html=True)
     if hc3.button("＋", key="hm_p"): st.session_state.score_home += 1; st.rerun()
 
-st.markdown(f"""
-<div class="win-prob-wrapper">
-    <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:4px; font-weight:bold;">
-        <span style="color:#3b82f6;">Visitor: {away_prob:.1f}%</span><span style="color:#ef4444;">Home: {win_prob:.1f}%</span>
-    </div>
-    <div class="win-prob-bar">
-        <div class="bar-away" style="width: {away_prob}%;">AWAY</div><div class="bar-home" style="width: {win_prob}%;">HOME</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+st.markdown(f"""<div class="win-prob-wrapper"><div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:4px; font-weight:bold;"><span style="color:#3b82f6;">Visitor: {away_prob:.1f}%</span><span style="color:#ef4444;">Home: {win_prob:.1f}%</span></div><div class="win-prob-bar"><div class="bar-away" style="width: {away_prob}%;">AWAY</div><div class="bar-home" style="width: {win_prob}%;">HOME</div></div></div>""", unsafe_allow_html=True)
 
 col_field, col_ctrl = st.columns([1.3, 1])
 with col_field:
@@ -347,8 +330,14 @@ with col_ctrl:
     if st.button("状況リセット", use_container_width=True, type="secondary"): reset_all_situation(); st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
-with st.expander("詳細設定・モデル情報"):
+with st.expander("詳細設定・モデル情報", expanded=True): # エラーが見やすいように開いておく
     if "split" in str(model_source): st.success(f"✅ 分割モデル: {model_source}")
     elif "loaded" in str(model_source): st.success(f"✅ 学習済みモデル: {model_source}")
-    else: st.info("ℹ️ デモモード: 簡易モデルを使用中")
-    if error_logs: st.warning(f"読込エラー ({len(error_logs)}件) が発生しました。")
+    else:
+        st.info("ℹ️ デモモード: 簡易モデルを使用中")
+        if load_errors:
+            st.error("⚠️ 以下のエラーによりモデルの読み込みに失敗しました:")
+            for err in load_errors:
+                st.code(err)
+                if "ModuleNotFoundError" in err or "incompatible" in err:
+                    st.warning("👉 ヒント: 学習環境と実行環境で scikit-learn のバージョンが異なる可能性があります。")
