@@ -116,8 +116,8 @@ def save_model_split(model, filename, chunk_size=20 * 1024 * 1024):
 
 def create_and_save_model():
     # 取得期間の設定
-    start_dt = '2024-05-08'
-    end_dt = '2024-05-14'
+    start_dt = '2025-01-01'
+    end_dt = '2025-12-31'
 
     try:
         raw_df = fetch_real_data(start_dt, end_dt)
