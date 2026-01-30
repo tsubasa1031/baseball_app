@@ -479,9 +479,21 @@ with col_ctrl:
     st.markdown('</div>', unsafe_allow_html=True)
 
 with st.expander("詳細設定・モデル情報"):
+    # デバッグ情報の表示
+    st.write("📂 モデルファイル探索状況:")
+    model_dir = 'baseball_model'
+    if os.path.exists(model_dir):
+        files = os.listdir(model_dir)
+        st.write(f"   - '{model_dir}' フォルダ: {len(files)} 個のファイルが見つかりました")
+        for f in files:
+            st.code(f"     {f}")
+    else:
+        st.warning(f"   - '{model_dir}' フォルダが見つかりません")
+
     if "split" in str(model_source):
         st.success(f"✅ 分割モデルファイルを結合して使用中: {model_source}")
     elif "loaded" in str(model_source):
         st.success(f"✅ 学習済みモデルファイルを使用中: {model_source}")
     else:
         st.info("ℹ️ デモモード: 簡易モデルを使用中")
+        st.caption("※ 本格的な予測を行うには、`train_model.py` を実行してモデルファイルを作成してください。")
