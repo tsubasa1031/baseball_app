@@ -1,1 +1,7 @@
+仮想環境有効化
 .\venv\Scripts\activate
+
+Gitアップロード
+git add .
+git commit -m "Update"
+git push origin main
