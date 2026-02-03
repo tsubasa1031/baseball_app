@@ -2,18 +2,22 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
-import requests
-import io # メモリ上でのファイル操作用
+import io
 
-# 機械学習ライブラリの読み込み
+# ページ設定 (必ず一番最初に書く必要があります)
+st.set_page_config(page_title="野球勝率シミュレーター", page_icon="⚾", layout="centered")
+
+# --- ライブラリの読み込み ---
+# エラーが起きてもアプリ全体がクラッシュしないように安全に読み込む
+ml_available = False
+import_error_msg = ""
 try:
     from sklearn.ensemble import RandomForestClassifier
     import joblib
     ml_available = True
-except ImportError:
+except Exception as e:
     ml_available = False
-
-st.set_page_config(page_title="野球勝率シミュレーター", page_icon="⚾", layout="centered")
+    import_error_msg = str(e)
 
 # --- 設定 ---
 EXTERNAL_MODEL_URL = "" 
@@ -30,8 +34,8 @@ default_state = {
     "runner_1": False,
     "runner_2": False,
     "runner_3": False,
-    "batter_ops": 0.720,      # 追加
-    "pitcher_opp_ops": 0.720  # 追加
+    "batter_ops": 0.720,
+    "pitcher_opp_ops": 0.720
 }
 
 for key, val in default_state.items():
@@ -54,12 +58,11 @@ def load_split_model(base_filepath):
     if not part_files:
         return None
 
-    combined_data = bytearray()
-    for part in part_files:
-        with open(part, "rb") as f:
-            combined_data.extend(f.read())
-            
     try:
+        combined_data = bytearray()
+        for part in part_files:
+            with open(part, "rb") as f:
+                combined_data.extend(f.read())
         return joblib.load(io.BytesIO(combined_data))
     except Exception:
         return None
@@ -68,19 +71,21 @@ def load_split_model(base_filepath):
 def load_or_train_model():
     # 戻り値: (モデル, 状態テキスト, エラーリスト)
     if not ml_available:
-        return None, "unavailable", ["scikit-learn または joblib がインストールされていません"]
+        return None, "unavailable", [f"ライブラリ読込エラー: {import_error_msg}"]
 
     # 探索するモデルのパス候補
     candidates = ['baseball_model.pkl']
     
     model_dir = 'baseball_model'
     if os.path.exists(model_dir):
-        files = os.listdir(model_dir)
-        pkl_candidates = [os.path.join(model_dir, f) for f in files if f.endswith('.pkl')]
-        part_candidates = [os.path.join(model_dir, f.replace('.part0', '')) for f in files if f.endswith('.pkl.part0')]
-        
-        candidates.extend(pkl_candidates)
-        candidates.extend(part_candidates)
+        try:
+            files = os.listdir(model_dir)
+            pkl_candidates = [os.path.join(model_dir, f) for f in files if f.endswith('.pkl')]
+            part_candidates = [os.path.join(model_dir, f.replace('.part0', '')) for f in files if f.endswith('.pkl.part0')]
+            candidates.extend(pkl_candidates)
+            candidates.extend(part_candidates)
+        except Exception:
+            pass
 
     # 候補をソート（新しいもの順）
     candidates.sort(reverse=True)
@@ -105,47 +110,45 @@ def load_or_train_model():
             error_logs.append(f"分割読込失敗: {os.path.basename(model_path)} -> {str(e)}")
 
     # 3. デモ用簡易学習 (モデルが見つからない場合)
-    # train_model.py と同じ特徴量構成 (9次元) で学習させる
-    n_samples = 3000
-    X = [] 
-    y = []
-    np.random.seed(42)
-    for _ in range(n_samples):
-        inn = np.random.randint(1, 10)
-        is_top = np.random.randint(0, 2)
-        diff = np.random.randint(-6, 7)
-        out = np.random.randint(0, 3)
-        r1 = np.random.randint(0, 2)
-        r2 = np.random.randint(0, 2)
-        r3 = np.random.randint(0, 2)
-        b_ops = np.random.normal(0.720, 0.1) # OPS
-        p_ops = np.random.normal(0.720, 0.1) # 被OPS
-        
-        prob = 0.5 + (diff * 0.1)
-        if inn >= 7: prob += (diff * 0.05)
-        runners_score = r1 + r2*1.5 + r3*2
-        
-        # 選手能力の影響
-        prob += (b_ops - 0.720) * 0.2 if is_top == 0 else -(b_ops - 0.720) * 0.2
-        prob += (p_ops - 0.720) * 0.2 if is_top == 1 else -(p_ops - 0.720) * 0.2
+    try:
+        n_samples = 3000
+        X = [] 
+        y = []
+        np.random.seed(42)
+        for _ in range(n_samples):
+            inn = np.random.randint(1, 10)
+            is_top = np.random.randint(0, 2)
+            diff = np.random.randint(-6, 7)
+            out = np.random.randint(0, 3)
+            r1 = np.random.randint(0, 2)
+            r2 = np.random.randint(0, 2)
+            r3 = np.random.randint(0, 2)
+            b_ops = np.random.normal(0.720, 0.1)
+            p_ops = np.random.normal(0.720, 0.1)
+            
+            prob = 0.5 + (diff * 0.1)
+            if inn >= 7: prob += (diff * 0.05)
+            runners_score = r1 + r2*1.5 + r3*2
+            prob += (b_ops - 0.720) * 0.2 if is_top == 0 else -(b_ops - 0.720) * 0.2
+            prob += (p_ops - 0.720) * 0.2 if is_top == 1 else -(p_ops - 0.720) * 0.2
 
-        if is_top == 1: 
-            prob -= (runners_score * 0.05)
-            prob += (out * 0.03)
-        else:
-            prob += (runners_score * 0.05)
-            prob -= (out * 0.03)
-        prob = max(0.05, min(0.95, prob))
-        win = 1 if np.random.rand() < prob else 0
-        
-        # 9次元の特徴量
-        X.append([diff, inn, is_top, out, r1, r2, r3, b_ops, p_ops])
-        y.append(win)
-        
-    clf = RandomForestClassifier(n_estimators=50, max_depth=7, random_state=42)
-    clf.fit(X, y)
-    
-    return clf, "trained (demo)", error_logs
+            if is_top == 1: 
+                prob -= (runners_score * 0.05)
+                prob += (out * 0.03)
+            else:
+                prob += (runners_score * 0.05)
+                prob -= (out * 0.03)
+            prob = max(0.05, min(0.95, prob))
+            win = 1 if np.random.rand() < prob else 0
+            
+            X.append([diff, inn, is_top, out, r1, r2, r3, b_ops, p_ops])
+            y.append(win)
+            
+        clf = RandomForestClassifier(n_estimators=50, max_depth=7, random_state=42)
+        clf.fit(X, y)
+        return clf, "trained (demo)", error_logs
+    except Exception as e:
+        return None, "failed", error_logs + [str(e)]
 
 ml_model, model_source, load_errors = load_or_train_model()
 
@@ -220,7 +223,6 @@ def calculate_win_prob_ml():
     score_diff = s.score_home - s.score_away
     is_top_val = 1 if s.top_bot == "表" else 0
     
-    # 9つの特徴量を作成
     input_data = [
         score_diff,
         s.inning,
@@ -233,9 +235,7 @@ def calculate_win_prob_ml():
         s.pitcher_opp_ops
     ]
     
-    # モデルの特徴量数と一致しない場合のフォールバック
     if hasattr(ml_model, "n_features_in_") and ml_model.n_features_in_ != len(input_data):
-        # 学習時の特徴量数が違う場合、とりあえず足りない分を埋めるか、切り詰める
         if ml_model.n_features_in_ > len(input_data):
             input_data.extend([0.720] * (ml_model.n_features_in_ - len(input_data)))
         else:
@@ -286,12 +286,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 1. スコアボード ---
 innings_html = "".join([f"<th>{i}</th>" for i in range(1, 10)])
 inning_cells = "<td></td>" * 9
 st.markdown(f"""<table class="scoreboard-table"><thead><tr><th class="team-name">TEAM</th>{innings_html}<th class="score-total">R</th><th>H</th><th>E</th></tr></thead><tbody><tr><td class="team-name" style="color:#60a5fa;">VISITOR</td>{inning_cells}<td class="score-total">{st.session_state.score_away}</td><td>-</td><td>-</td></tr><tr><td class="team-name" style="color:#f87171;">HOME</td>{inning_cells}<td class="score-total">{st.session_state.score_home}</td><td>-</td><td>-</td></tr></tbody></table>""", unsafe_allow_html=True)
 
-# --- 2. スコア & イニング操作 ---
 c1, c2, c3 = st.columns([1, 0.8, 1])
 with c1:
     st.markdown('<div class="control-label" style="color:#3b82f6;">VISITOR</div>', unsafe_allow_html=True)
@@ -342,14 +340,11 @@ with col_ctrl:
     st.markdown('</div>', unsafe_allow_html=True)
 
 with st.expander("詳細設定・モデル情報", expanded=True):
-    # OPS調整スライダー
-    st.caption("選手能力補正")
     c_ops1, c_ops2 = st.columns(2)
     st.session_state.batter_ops = c_ops1.slider("打者OPS", 0.000, 1.500, st.session_state.batter_ops, 0.001, format="%.3f")
     st.session_state.pitcher_opp_ops = c_ops2.slider("投手被OPS", 0.000, 1.500, st.session_state.pitcher_opp_ops, 0.001, format="%.3f")
-    
     st.divider()
     if "split" in str(model_source): st.success(f"✅ 分割モデル: {model_source}")
     elif "loaded" in str(model_source): st.success(f"✅ 学習済みモデル: {model_source}")
-    else: st.info("ℹ️ デモモード: 簡易モデルを使用中");
-    if load_errors: st.warning(f"読込エラー発生: {load_errors}")
+    else: st.info(f"ℹ️ デモモード: 簡易モデルを使用中");
+    if load_errors: st.warning(f"読込エラー ({len(load_errors)}件) を検知しました: {load_errors[0]}")
