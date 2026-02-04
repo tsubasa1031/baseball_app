@@ -4,23 +4,17 @@ import numpy as np
 import os
 import io
 
-# ページ設定 (必ず一番最初に書く必要があります)
+# ページ設定
 st.set_page_config(page_title="野球勝率シミュレーター", page_icon="⚾", layout="centered")
 
 # --- ライブラリの読み込み ---
-# エラーが起きてもアプリ全体がクラッシュしないように安全に読み込む
 ml_available = False
-import_error_msg = ""
 try:
-    from sklearn.ensemble import RandomForestClassifier
     import joblib
+    # 予測に必要なライブラリのみインポート
     ml_available = True
-except Exception as e:
+except ImportError:
     ml_available = False
-    import_error_msg = str(e)
-
-# --- 設定 ---
-EXTERNAL_MODEL_URL = "" 
 
 # --- 状態管理 ---
 default_state = {
@@ -68,10 +62,12 @@ def load_split_model(base_filepath):
         return None
 
 @st.cache_resource
-def load_or_train_model():
-    # 戻り値: (モデル, 状態テキスト, エラーリスト)
+def load_model():
+    """ 
+    学習機能は持たず、既存のモデルファイルの読み込みのみを行う 
+    """
     if not ml_available:
-        return None, "unavailable", [f"ライブラリ読込エラー: {import_error_msg}"]
+        return None, "unavailable", ["ライブラリ不足"]
 
     # 探索するモデルのパス候補
     candidates = ['baseball_model.pkl']
@@ -87,70 +83,33 @@ def load_or_train_model():
         except Exception:
             pass
 
-    # 候補をソート（新しいもの順）
+    # 新しい順にソート
     candidates.sort(reverse=True)
 
-    error_logs = []
+    load_errors = []
 
     for model_path in candidates:
-        # 1. 通常のモデルファイルがある場合
+        # 1. 通常ファイルの読み込み
         if os.path.exists(model_path):
             try:
                 return joblib.load(model_path), f"loaded ({os.path.basename(model_path)})", []
             except Exception as e:
-                error_logs.append(f"読込失敗: {os.path.basename(model_path)} -> {str(e)}")
+                load_errors.append(f"{os.path.basename(model_path)}: {str(e)}")
                 continue
 
-        # 2. 分割モデルファイルがある場合
+        # 2. 分割ファイルの読み込み
         try:
             split_model = load_split_model(model_path)
             if split_model:
                 return split_model, f"loaded split ({os.path.basename(model_path)})", []
         except Exception as e:
-            error_logs.append(f"分割読込失敗: {os.path.basename(model_path)} -> {str(e)}")
+            load_errors.append(f"{os.path.basename(model_path)} (split): {str(e)}")
 
-    # 3. デモ用簡易学習 (モデルが見つからない場合)
-    try:
-        n_samples = 3000
-        X = [] 
-        y = []
-        np.random.seed(42)
-        for _ in range(n_samples):
-            inn = np.random.randint(1, 10)
-            is_top = np.random.randint(0, 2)
-            diff = np.random.randint(-6, 7)
-            out = np.random.randint(0, 3)
-            r1 = np.random.randint(0, 2)
-            r2 = np.random.randint(0, 2)
-            r3 = np.random.randint(0, 2)
-            b_ops = np.random.normal(0.720, 0.1)
-            p_ops = np.random.normal(0.720, 0.1)
-            
-            prob = 0.5 + (diff * 0.1)
-            if inn >= 7: prob += (diff * 0.05)
-            runners_score = r1 + r2*1.5 + r3*2
-            prob += (b_ops - 0.720) * 0.2 if is_top == 0 else -(b_ops - 0.720) * 0.2
-            prob += (p_ops - 0.720) * 0.2 if is_top == 1 else -(p_ops - 0.720) * 0.2
+    # モデルが見つからない場合は None を返す（学習はしない）
+    return None, "not_found", load_errors
 
-            if is_top == 1: 
-                prob -= (runners_score * 0.05)
-                prob += (out * 0.03)
-            else:
-                prob += (runners_score * 0.05)
-                prob -= (out * 0.03)
-            prob = max(0.05, min(0.95, prob))
-            win = 1 if np.random.rand() < prob else 0
-            
-            X.append([diff, inn, is_top, out, r1, r2, r3, b_ops, p_ops])
-            y.append(win)
-            
-        clf = RandomForestClassifier(n_estimators=50, max_depth=7, random_state=42)
-        clf.fit(X, y)
-        return clf, "trained (demo)", error_logs
-    except Exception as e:
-        return None, "failed", error_logs + [str(e)]
-
-ml_model, model_source, load_errors = load_or_train_model()
+# モデルのロード実行（ここが高速化の鍵）
+ml_model, model_source, load_errors = load_model()
 
 # --- ロジック関数 ---
 def reset_all_situation():
@@ -200,6 +159,7 @@ def add_out():
         st.session_state.runner_3 = False
 
 def calculate_win_prob_simple():
+    """ 簡易ロジック（モデルがない場合に使用） """
     s = st.session_state
     score_diff = s.score_home - s.score_away
     base_prob = 50 + (score_diff * 10)
@@ -216,6 +176,8 @@ def calculate_win_prob_simple():
     return max(0.1, min(99.9, final_prob))
 
 def calculate_win_prob_ml():
+    """ 機械学習モデルを使って勝率を予測（推論）する """
+    # モデルがなければ簡易計算へ
     if ml_model is None:
         return calculate_win_prob_simple()
 
@@ -235,6 +197,7 @@ def calculate_win_prob_ml():
         s.pitcher_opp_ops
     ]
     
+    # 特徴量数の調整（モデル作成時と不一致の場合の安全策）
     if hasattr(ml_model, "n_features_in_") and ml_model.n_features_in_ != len(input_data):
         if ml_model.n_features_in_ > len(input_data):
             input_data.extend([0.720] * (ml_model.n_features_in_ - len(input_data)))
@@ -242,6 +205,7 @@ def calculate_win_prob_ml():
             input_data = input_data[:ml_model.n_features_in_]
 
     try:
+        # ここで推論実行（一瞬で終わる）
         prob = ml_model.predict_proba([input_data])[0][1]
         return prob * 100
     except Exception:
@@ -346,5 +310,7 @@ with st.expander("詳細設定・モデル情報", expanded=True):
     st.divider()
     if "split" in str(model_source): st.success(f"✅ 分割モデル: {model_source}")
     elif "loaded" in str(model_source): st.success(f"✅ 学習済みモデル: {model_source}")
-    else: st.info(f"ℹ️ デモモード: 簡易モデルを使用中");
+    else: 
+        st.info("ℹ️ 学習済みモデルなし (簡易計算モード)")
+        st.caption("VSCodeで `train_model.py` を実行してモデルを作成し、GitHubにプッシュしてください。")
     if load_errors: st.warning(f"読込エラー ({len(load_errors)}件) を検知しました: {load_errors[0]}")
